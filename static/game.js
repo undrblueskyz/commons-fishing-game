@@ -39,13 +39,13 @@ function wsUrl() {
 
 function resetBoard(stock, maxHarvest) {
   fishTokens = [];
+
   // show up to 30 tokens; each token represents "tokenValue" fish
   const displayCount = Math.min(30, stock);
   const tokenValue = Math.max(1, Math.ceil(stock / Math.max(1, displayCount)));
   tokenValueEl.textContent = tokenValue;
 
   // tokens available to drag: cap by maxHarvest (game feel)
-  // we still render a pond; player can't exceed maxHarvest tokens.
   const tokensToSpawn = Math.min(maxHarvest, displayCount);
 
   for (let i = 0; i < tokensToSpawn; i++) {
@@ -158,9 +158,10 @@ function renderState(state) {
   const players = (state.players || []).map(p => `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`);
   playersLabel.textContent = players.join(", ");
 
+  const minP = state.min_players_to_start || 2;
+  const maxP = state.max_players_per_room || 4;
+
   if (!state.started) {
-    const minP = state.min_players_to_start || 2;
-    const maxP = state.max_players_per_room || 4;
     statusEl.textContent = `Waiting for at least ${minP} players… (${(state.players||[]).length}/${maxP})`;
     submitBtn.disabled = true;
   } else if (state.finished) {
@@ -171,24 +172,18 @@ function renderState(state) {
     submitBtn.disabled = false;
   }
 
-  // show last round results to make the commons dynamic visible AFTER round 1
+  // show last round results (still mild / not too explanatory)
   if (state.last_round_results) {
     const r = state.last_round_results;
     const lines = [];
     lines.push(`<div><b>Last round:</b></div>`);
-    lines.push(`<div>Harvested total: <b>${r.harvested_total}</b>, Remaining: <b>${r.remaining}</b></div>`);
-    if (state.round_num >= state.growth_start_round) {
-      lines.push(`<div>Growth rule active: next stock = 3 × remaining</div>`);
-    } else {
-      lines.push(`<div>No growth yet (round 1)</div>`);
-    }
+    lines.push(`<div>Total harvested: <b>${r.harvested_total}</b>, Remaining: <b>${r.remaining}</b></div>`);
     resultsEl.innerHTML = lines.join("");
   } else {
     resultsEl.innerHTML = "";
   }
 
   // Reset the board each round for that "game" feel
-  // Only do this when state round changes OR on first render
   if (window._lastRenderedRound !== state.round_num) {
     window._lastRenderedRound = state.round_num;
     resetBoard(state.stock, state.max_harvest_per_player);
@@ -257,9 +252,9 @@ submitBtn.addEventListener("click", () => {
   const count = fishTokens.filter(f => f.inNet).length;
   let harvest = count * tokenValue;
 
-  // enforce server max, but keep UI consistent
   harvest = Math.max(0, Math.min(currentState.max_harvest_per_player, harvest));
 
   ws.send(JSON.stringify({ type: "submit", harvest }));
   statusEl.textContent = "Submitted. Waiting for others…";
 });
+
