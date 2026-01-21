@@ -178,6 +178,10 @@ async def ws_endpoint(websocket: WebSocket):
                 room_code = msg.get("room_code", "").strip().upper()
                 name = (msg.get("name") or "Player").strip()[:24]
                 room = get_or_create_room(room_code)
+                # Don't allow joining after game has started (keeps player count stable)
+            if room.started:
+                await websocket.send_text(json.dumps({"type": "error", "message": "This room already started. Use a different room code."}))
+                continue
 
                 # room full?
                 if len(room.players) >= MAX_PLAYERS_PER_ROOM and not any(p.name == name for p in room.players):
@@ -193,7 +197,7 @@ async def ws_endpoint(websocket: WebSocket):
                 connections[room_code].append(websocket)
 
                 # start when 4 players join
-                if len(room.players) == MAX_PLAYERS_PER_ROOM:
+                if len(room.players) >= MIN_PLAYERS_TO_START:
                     room.started = True
 
                 await websocket.send_text(json.dumps({"type": "joined", "player_id": player_id}))
@@ -217,7 +221,7 @@ async def ws_endpoint(websocket: WebSocket):
                 room.submissions[player_id] = harvest
 
                 # if everyone submitted, resolve round
-                if len(room.submissions) == MAX_PLAYERS_PER_ROOM:
+                if len(room.submissions) == len(room.players):
                     resolve_round(room)
 
                 await broadcast(room_code, {"type": "state", "state": room.to_public()})
