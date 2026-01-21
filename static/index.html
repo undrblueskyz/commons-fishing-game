@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Commons Fishing Game</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>Commons Fishing</h1>
+    <p class="sub">Drag fish into your net. Submit when ready. (4 players per room)</p>
+
+    <div id="join" class="card">
+      <div class="row">
+        <label>Room code</label>
+        <input id="room" placeholder="e.g., PUB522-A" />
+      </div>
+      <div class="row">
+        <label>Your name</label>
+        <input id="name" placeholder="Your name" />
+      </div>
+      <button id="joinBtn">Join room</button>
+      <div id="joinMsg" class="msg"></div>
+    </div>
+
+    <div id="game" class="card hidden">
+      <div class="topbar">
+        <div><b>Room:</b> <span id="roomLabel"></span></div>
+        <div><b>Round:</b> <span id="roundLabel"></span></div>
+        <div><b>Stock:</b> <span id="stockLabel"></span></div>
+      </div>
+
+      <div class="players">
+        <div><b>Players (submitted ✓):</b> <span id="playersLabel"></span></div>
+      </div>
+
+      <div class="board">
+        <canvas id="pond" width="860" height="420"></canvas>
+        <div class="side">
+          <div class="stat"><b>Your catch this round:</b> <span id="catchNow">0</span></div>
+          <div class="stat"><b>Max per player:</b> <span id="maxPer">0</span></div>
+          <div class="stat"><b>Each token =</b> <span id="tokenValue">1</span> fish</div>
+          <button id="submitBtn">Submit catch</button>
+          <div id="status" class="msg"></div>
+
+          <hr/>
+
+          <div id="results" class="results"></div>
+        </div>
+      </div>
+
+      <div id="end" class="hidden">
+        <h2>Game over</h2>
+        <div id="leaderboard"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Tip: Use different room codes for different groups (PUB522-A, PUB522-B, etc.).
+    </div>
+  </div>
+
+  <script src="/static/game.js"></script>
+</body>
+</html>
