@@ -159,7 +159,9 @@ function renderState(state) {
   playersLabel.textContent = players.join(", ");
 
   if (!state.started) {
-    statusEl.textContent = `Waiting for 4 players… (${(state.players||[]).length}/4)`;
+    const minP = state.min_players_to_start || 2;
+    const maxP = state.max_players_per_room || 4;
+    statusEl.textContent = `Waiting for at least ${minP} players… (${(state.players||[]).length}/${maxP})`;
     submitBtn.disabled = true;
   } else if (state.finished) {
     statusEl.textContent = `Finished.`;
