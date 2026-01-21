@@ -60,6 +60,8 @@ class RoomState:
             "max_harvest_per_player": MAX_HARVEST_PER_PLAYER,
             "growth_start_round": GROWTH_START_ROUND,
             "stock_cap": STOCK_CAP,
+            "min_players_to_start": MIN_PLAYERS_TO_START,
+            "max_players_per_room": MAX_PLAYERS_PER_ROOM,
             "players": [{"player_id": p.player_id, "name": p.name} for p in self.players],
             "submitted": list(self.submissions.keys()),
             "totals": self.totals,
