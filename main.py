@@ -21,6 +21,7 @@ def root():
 # -------------------------
 # Game config (easy knobs)
 # -------------------------
+MIN_PLAYERS_TO_START = 2
 MAX_PLAYERS_PER_ROOM = 4
 ROUNDS_TOTAL = 6
 STARTING_STOCK = 40
