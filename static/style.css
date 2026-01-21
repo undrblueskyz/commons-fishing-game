@@ -1,0 +1,20 @@
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #f6f7fb; margin: 0; }
+.wrap { max-width: 1020px; margin: 18px auto; padding: 0 14px; }
+h1 { margin: 0 0 6px; }
+.sub { margin: 0 0 14px; color: #444; }
+.card { background: white; border-radius: 14px; padding: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.08); }
+.row { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin: 10px 0; }
+input { padding: 10px; border-radius: 10px; border: 1px solid #cfd6e4; }
+button { padding: 10px 12px; border: 0; border-radius: 10px; cursor: pointer; font-weight: 600; }
+button:hover { filter: brightness(0.96); }
+.hidden { display: none; }
+.msg { margin-top: 10px; color: #333; }
+.topbar { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+.players { margin-bottom: 10px; color: #333; }
+.board { display: grid; grid-template-columns: 1fr 260px; gap: 12px; align-items: start; }
+canvas { background: linear-gradient(#d9f3ff, #bfe7ff); border-radius: 14px; border: 1px solid #cfd6e4; }
+.side { background: #fbfcff; border: 1px solid #e3e8f5; border-radius: 14px; padding: 12px; }
+.stat { margin: 8px 0; }
+.results { font-size: 14px; color: #222; }
+.footer { margin-top: 14px; color: #555; font-size: 14px; }
+hr { border: 0; border-top: 1px solid #e3e8f5; margin: 12px 0; }
