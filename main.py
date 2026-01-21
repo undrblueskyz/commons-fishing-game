@@ -1,6 +1,5 @@
 import json
 import time
-import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -13,6 +12,7 @@ app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
 @app.get("/")
 def root():
     return FileResponse("static/index.html")
@@ -23,9 +23,11 @@ def root():
 # -------------------------
 MIN_PLAYERS_TO_START = 2
 MAX_PLAYERS_PER_ROOM = 4
+
 ROUNDS_TOTAL = 6
 STARTING_STOCK = 40
 MAX_HARVEST_PER_PLAYER = 20
+
 GROWTH_START_ROUND = 2          # Round 2 onward: each remaining fish spawns +2 (=> 3x remaining)
 STOCK_CAP = 200                 # prevents runaway numbers; set to None to disable
 
@@ -37,6 +39,7 @@ STOCK_CAP = 200                 # prevents runaway numbers; set to None to disab
 class Player:
     player_id: str
     name: str
+
 
 @dataclass
 class RoomState:
@@ -125,8 +128,11 @@ def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]
 
 
 def resolve_round(room: RoomState):
-    # Compute actual catches
-    requested = {pid: min(MAX_HARVEST_PER_PLAYER, max(0, int(h))) for pid, h in room.submissions.items()}
+    # compute catches
+    requested = {
+        pid: min(MAX_HARVEST_PER_PLAYER, max(0, int(h)))
+        for pid, h in room.submissions.items()
+    }
     actual = scale_down_harvests(room.stock, requested)
 
     harvested_total = sum(actual.values())
@@ -151,6 +157,7 @@ def resolve_round(room: RoomState):
         "harvested_total": harvested_total,
         "remaining": remaining,
         "next_stock": next_stock,
+        "players_this_room": len(room.players),
     }
 
     room.stock = next_stock
@@ -171,36 +178,50 @@ async def ws_endpoint(websocket: WebSocket):
     try:
         while True:
             raw = await websocket.receive_text()
-            msg = json.loads(raw)
-            mtype = msg.get("type")
 
-# Be tolerant of older/cached clients or slightly different payloads
+            # Be tolerant of non-JSON / keepalives / odd client frames
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+
+            mtype = (msg.get("type") or "").strip().lower()
+
+            # Accept older/cached clients or alternate payload shapes
             if not mtype:
                 if "room_code" in msg and "name" in msg:
                     mtype = "join"
                 elif "harvest" in msg:
                     mtype = "submit"
-                else:
-        # Ignore unknown/no-op messages rather than erroring
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Unknown message type."}))
-                    continue
 
+            # Normalize common variants just in case
+            if mtype in {"join_room", "connect", "hello"}:
+                mtype = "join"
+            if mtype in {"harvest", "catch"}:
+                mtype = "submit"
 
             if mtype == "join":
-                room_code = msg.get("room_code", "").strip().upper()
-                name = (msg.get("name") or "Player").strip()[:24]
+                room_code = (msg.get("room_code", "") or "").strip().upper()
+                name = ((msg.get("name") or "Player").strip() or "Player")[:24]
                 room = get_or_create_room(room_code)
-                # Don't allow joining after game has started (keeps player count stable)
-            if room.started:
-                await websocket.send_text(json.dumps({"type": "error", "message": "This room already started. Use a different room code."}))
-                continue
 
-                # room full?
-                if len(room.players) >= MAX_PLAYERS_PER_ROOM and not any(p.name == name for p in room.players):
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Room is full (4 players). Use a different room code."}))
+                # Don't allow joining after game has started (keeps player count stable)
+                if room.started:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "This room already started. Use a different room code."
+                    }))
                     continue
 
-                # assign player_id (stable for this socket)
+                # room full?
+                if len(room.players) >= MAX_PLAYERS_PER_ROOM:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Room is full (max 4 players). Use a different room code."
+                    }))
+                    continue
+
+                # assign player_id
                 player_id = str(uuid.uuid4())[:8]
 
                 room.players.append(Player(player_id=player_id, name=name))
@@ -208,7 +229,7 @@ async def ws_endpoint(websocket: WebSocket):
 
                 connections[room_code].append(websocket)
 
-                # start when 4 players join
+                # start when at least MIN players join
                 if len(room.players) >= MIN_PLAYERS_TO_START:
                     room.started = True
 
@@ -221,40 +242,42 @@ async def ws_endpoint(websocket: WebSocket):
                     continue
 
                 room = get_or_create_room(room_code)
+
                 if room.finished:
                     await websocket.send_text(json.dumps({"type": "state", "state": room.to_public()}))
                     continue
+
                 if not room.started:
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Waiting for 4 players to join."}))
+                    await websocket.send_text(json.dumps({"type": "error", "message": "Waiting for at least 2 players to join."}))
                     continue
 
                 harvest = int(msg.get("harvest", 0))
                 harvest = max(0, min(MAX_HARVEST_PER_PLAYER, harvest))
                 room.submissions[player_id] = harvest
 
-                # if everyone submitted, resolve round
+                # resolve when everyone in THIS room has submitted
                 if len(room.submissions) == len(room.players):
                     resolve_round(room)
 
                 await broadcast(room_code, {"type": "state", "state": room.to_public()})
 
             elif mtype == "reset":
-                # optional teacher reset if you want it later (simple shared password could be added)
+                # Simple reset (optional)
                 if not room_code:
                     continue
-                room = get_or_create_room(room_code)
                 rooms[room_code] = RoomState(room_code=room_code)
                 await broadcast(room_code, {"type": "state", "state": rooms[room_code].to_public()})
 
             else:
-                await websocket.send_text(json.dumps({"type": "error", "message": "Unknown message type."}))
+                # Ignore unknown messages (prevents noisy failures from cached clients/extensions/keepalives)
+                continue
 
     except WebSocketDisconnect:
-        # remove websocket from connections
         if room_code and websocket in connections.get(room_code, []):
             connections[room_code].remove(websocket)
-    except Exception as e:
+    except Exception:
+        # Don't crash the server loop on unexpected exceptions
         try:
-            await websocket.send_text(json.dumps({"type": "error", "message": f"Server error: {e}"}))
+            await websocket.send_text(json.dumps({"type": "error", "message": "Server error."}))
         except Exception:
             pass
