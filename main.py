@@ -174,6 +174,18 @@ async def ws_endpoint(websocket: WebSocket):
             msg = json.loads(raw)
             mtype = msg.get("type")
 
+# Be tolerant of older/cached clients or slightly different payloads
+            if not mtype:
+                if "room_code" in msg and "name" in msg:
+                    mtype = "join"
+                elif "harvest" in msg:
+                    mtype = "submit"
+                else:
+        # Ignore unknown/no-op messages rather than erroring
+                    await websocket.send_text(json.dumps({"type": "error", "message": "Unknown message type."}))
+                    continue
+
+
             if mtype == "join":
                 room_code = msg.get("room_code", "").strip().upper()
                 name = (msg.get("name") or "Player").strip()[:24]
