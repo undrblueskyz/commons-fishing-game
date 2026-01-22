@@ -24,15 +24,14 @@ MIN_PLAYERS_TO_START = 2
 MAX_PLAYERS_PER_ROOM = 4
 
 ROUNDS_TOTAL = 6
-STARTING_STOCK = 20              # <-- Set your starting fish per room here
-MAX_HARVEST_PER_PLAYER = 20      # per season per player
+STARTING_STOCK = 20              # your example uses 20
+MAX_HARVEST_PER_PLAYER = 20
 
-# Each remaining fish spawns 2 more => next stock = remaining * 3
-# If you want this to apply starting in Season 2, leave as 2.
-# If you want it to apply immediately after Season 1 (your example), use 1.
+# Each remaining fish spawns 2 more => next_stock = remaining * 3
+# Set to 1 to apply immediately after Season 1 (your example: 2 remaining -> 6 next)
 GROWTH_START_ROUND = 1
 
-STOCK_CAP = 200                  # prevents runaway growth; set None to disable
+STOCK_CAP = 200                  # set None to disable
 
 
 # -------------------------
@@ -108,15 +107,17 @@ async def broadcast(room_code: str, message: dict):
 
 
 def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]:
+    """
+    If total requested > available stock, scale requests proportionally so total actual == stock.
+    """
     total_req = sum(requested.values())
     if total_req <= stock:
         return requested
 
-    # proportional scaling
-    scale = stock / total_req if total_req > 0 else 0
+    scale = stock / total_req if total_req > 0 else 0.0
     scaled = {pid: int(round(h * scale)) for pid, h in requested.items()}
 
-    # fix rounding so it sums to exactly stock
+    # fix rounding so it sums exactly to stock
     diff = stock - sum(scaled.values())
     pids = list(scaled.keys())
     i = 0
@@ -143,7 +144,7 @@ def resolve_round(room: RoomState):
     harvested_total = sum(actual.values())
     remaining = max(0, room.stock - harvested_total)
 
-    # Growth rule (each remaining fish spawns 2 => total 3x)
+    # Growth: each remaining fish spawns 2 more => total triples
     if room.round_num >= GROWTH_START_ROUND:
         next_stock = remaining * 3
     else:
@@ -175,12 +176,14 @@ def resolve_round(room: RoomState):
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
 
-    room_code = None
-    player_id = None
+    room_code: Optional[str] = None
+    player_id: Optional[str] = None
 
     try:
         while True:
             raw = await websocket.receive_text()
+
+            # tolerate odd frames
             try:
                 msg = json.loads(raw)
             except Exception:
@@ -188,7 +191,7 @@ async def ws_endpoint(websocket: WebSocket):
 
             mtype = (msg.get("type") or "").strip().lower()
 
-            # fallback for odd clients
+            # fallback if type is missing
             if not mtype:
                 if "room_code" in msg and "name" in msg:
                     mtype = "join"
@@ -200,6 +203,7 @@ async def ws_endpoint(websocket: WebSocket):
                 name = ((msg.get("name") or "Player").strip() or "Player")[:24]
                 room = get_or_create_room(room_code)
 
+                # do not allow joining after room started
                 if room.started:
                     await websocket.send_text(json.dumps({
                         "type": "error",
@@ -232,3 +236,41 @@ async def ws_endpoint(websocket: WebSocket):
                     continue
 
                 room = get_or_create_room(room_code)
+
+                if room.finished:
+                    await websocket.send_text(json.dumps({"type": "state", "state": room.to_public()}))
+                    continue
+
+                if not room.started:
+                    await websocket.send_text(json.dumps({"type": "error", "message": "Waiting for more players to join."}))
+                    continue
+
+                harvest = int(msg.get("harvest", 0))
+                harvest = max(0, min(MAX_HARVEST_PER_PLAYER, harvest))
+                room.submissions[player_id] = harvest
+
+                # resolve when everyone in THIS room submitted
+                if len(room.submissions) == len(room.players):
+                    resolve_round(room)
+
+                await broadcast(room_code, {"type": "state", "state": room.to_public()})
+
+            elif mtype == "reset":
+                # resets ONLY THIS ROOM
+                if not room_code:
+                    continue
+                rooms[room_code] = RoomState(room_code=room_code)
+                await broadcast(room_code, {"type": "state", "state": rooms[room_code].to_public()})
+
+            else:
+                # ignore unknown messages
+                continue
+
+    except WebSocketDisconnect:
+        if room_code and websocket in connections.get(room_code, []):
+            connections[room_code].remove(websocket)
+    except Exception:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": "Server error."}))
+        except Exception:
+            pass
