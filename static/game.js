@@ -1,8 +1,9 @@
-// Drag-into-net fishing UI + WebSocket room sync.
-// Gamey tweak: two nets + two fish colors (red/blue). Only correctly sorted fish count.
+// =====================================================
+// Commons Fishing Game — Red/Blue Sorting + Swimming Fish
+// UX fix: after Submit, remove caught fish + lock input until next round updates
+// =====================================================
 
 let ws = null;
-let playerId = null;
 let currentState = null;
 
 const joinDiv = document.getElementById("join");
@@ -32,16 +33,46 @@ const ctx = canvas.getContext("2d");
 let fishTokens = [];
 let dragging = null;
 
-// Two nets to add “sorting” distraction.
-let redNet = { x: 620, y: 90,  w: 210, h: 130 };
-let blueNet = { x: 620, y: 250, w: 210, h: 130 };
+let inputLocked = false;        // lock after submit until next round update
+let lastRoundRendered = null;
+
+const redNet = { x: 610, y: 90,  w: 220, h: 130 };
+const blueNet = { x: 610, y: 250, w: 220, h: 130 };
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws`;
 }
 
-// --- Utility drawing helpers (no fancy dependencies) ---
+function resetBoard(stock, maxHarvest) {
+  fishTokens = [];
+  dragging = null;
+  inputLocked = false;
+
+  const displayCount = Math.min(30, stock);
+  const tokenValue = Math.max(1, Math.ceil(stock / Math.max(1, displayCount)));
+  tokenValueEl.textContent = tokenValue;
+
+  const spawn = Math.min(displayCount, maxHarvest);
+
+  for (let i = 0; i < spawn; i++) {
+    fishTokens.push({
+      id: i,
+      x: 70 + (i % 10) * 55,
+      y: 70 + Math.floor(i / 10) * 55,
+      r: 16,
+      color: i % 2 === 0 ? "red" : "blue",
+      inRed: false,
+      inBlue: false,
+      vx: (Math.random() - 0.5) * 0.6,
+      vy: (Math.random() - 0.5) * 0.6
+    });
+  }
+
+  updateCatchNow();
+  draw();
+}
+
 function drawRoundedRect(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -56,180 +87,118 @@ function drawRoundedRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-function inRect(mx, my, rect) {
-  return (mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h);
-}
-
-function resetBoard(stock, maxHarvest) {
-  fishTokens = [];
-
-  // Display up to 30 “tokens” in the pond; each token represents tokenValue fish.
-  const displayCount = Math.min(30, stock);
-  const tokenValue = Math.max(1, Math.ceil(stock / Math.max(1, displayCount)));
-  tokenValueEl.textContent = tokenValue;
-
-  // Spawn tokens up to maxHarvest for “game feel”
-  const tokensToSpawn = Math.min(maxHarvest, displayCount);
-
-  for (let i = 0; i < tokensToSpawn; i++) {
-    const color = (i % 2 === 0) ? "red" : "blue"; // simple alternating colors
-    fishTokens.push({
-      id: i,
-      x: 70 + (i % 10) * 55,
-      y: 70 + Math.floor(i / 10) * 55,
-      r: 16,
-      color,          // "red" or "blue"
-      inRed: false,
-      inBlue: false
-    });
-  }
-
-  updateCatchNow();
-  draw();
-}
-
-function updateCatchNow() {
-  const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
-
-  // Only correctly sorted fish count:
-  // - red fish must be in red net
-  // - blue fish must be in blue net
-  const correctCount = fishTokens.filter(f =>
-    (f.color === "red" && f.inRed) || (f.color === "blue" && f.inBlue)
-  ).length;
-
-  catchNowEl.textContent = correctCount * tokenValue;
-}
-
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Background label
   ctx.font = "16px system-ui";
+  ctx.fillStyle = "black";
   ctx.fillText("Pond", 16, 24);
 
-  // Nets (gamey UI)
   // Red net
-  ctx.save();
-  ctx.globalAlpha = 0.12;
-  ctx.fillStyle = "red";
+  ctx.fillStyle = "rgba(255,0,0,0.15)";
   drawRoundedRect(redNet.x, redNet.y, redNet.w, redNet.h, 14);
   ctx.fill();
-  ctx.restore();
-
   ctx.strokeStyle = "black";
-  drawRoundedRect(redNet.x, redNet.y, redNet.w, redNet.h, 14);
   ctx.stroke();
-
-  ctx.font = "14px system-ui";
+  ctx.fillStyle = "black";
   ctx.fillText("Red Net", redNet.x + 10, redNet.y + 20);
-  ctx.font = "12px system-ui";
-  ctx.fillText("Drop red fish here", redNet.x + 10, redNet.y + 40);
 
   // Blue net
-  ctx.save();
-  ctx.globalAlpha = 0.12;
-  ctx.fillStyle = "blue";
+  ctx.fillStyle = "rgba(0,0,255,0.15)";
   drawRoundedRect(blueNet.x, blueNet.y, blueNet.w, blueNet.h, 14);
   ctx.fill();
-  ctx.restore();
-
   ctx.strokeStyle = "black";
-  drawRoundedRect(blueNet.x, blueNet.y, blueNet.w, blueNet.h, 14);
   ctx.stroke();
-
-  ctx.font = "14px system-ui";
+  ctx.fillStyle = "black";
   ctx.fillText("Blue Net", blueNet.x + 10, blueNet.y + 20);
-  ctx.font = "12px system-ui";
-  ctx.fillText("Drop blue fish here", blueNet.x + 10, blueNet.y + 40);
 
-  // Fish tokens
+  // Fish
   for (const f of fishTokens) {
-    // fish body
     ctx.beginPath();
-    ctx.fillStyle = (f.color === "red") ? "red" : "blue";
+    ctx.fillStyle = f.color;   // red/blue
     ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "black";
     ctx.stroke();
 
-    // tail
     ctx.beginPath();
     ctx.moveTo(f.x + f.r, f.y);
     ctx.lineTo(f.x + f.r + 10, f.y - 6);
     ctx.lineTo(f.x + f.r + 10, f.y + 6);
     ctx.closePath();
     ctx.fill();
-    ctx.stroke();
   }
 
-  // Bottom instruction (kept “gamey”)
   ctx.font = "14px system-ui";
   ctx.fillStyle = "black";
-  ctx.fillText("Drag fish into the correct net, then Submit.", 16, canvas.height - 16);
+  ctx.fillText(inputLocked ? "Waiting for the round to resolve…" : "Sort fish into the matching net, then Submit.", 16, canvas.height - 16);
+}
+
+function animateFish() {
+  for (const f of fishTokens) {
+    if (dragging && dragging.fish === f) continue;
+    // Don't animate fish once input locked (keeps the “submitted” state calm)
+    if (inputLocked) continue;
+
+    f.x += f.vx;
+    f.y += f.vy;
+
+    if (f.x < 30 || f.x > 560) f.vx *= -1;
+    if (f.y < 40 || f.y > 380) f.vy *= -1;
+  }
+
+  draw();
+  requestAnimationFrame(animateFish);
+}
+
+function updateCatchNow() {
+  const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
+  const correct = fishTokens.filter(f =>
+    (f.color === "red" && f.inRed) ||
+    (f.color === "blue" && f.inBlue)
+  ).length;
+  catchNowEl.textContent = correct * tokenValue;
 }
 
 function hitFish(mx, my) {
   for (let i = fishTokens.length - 1; i >= 0; i--) {
     const f = fishTokens[i];
-    const dx = mx - f.x, dy = my - f.y;
+    const dx = mx - f.x;
+    const dy = my - f.y;
     if (Math.sqrt(dx * dx + dy * dy) <= f.r + 2) return f;
   }
   return null;
 }
 
-function placeFishInNets(f) {
-  // Clear prior net state
-  f.inRed = false;
-  f.inBlue = false;
-
-  if (inRect(f.x, f.y, redNet)) f.inRed = true;
-  if (inRect(f.x, f.y, blueNet)) f.inBlue = true;
-
-  // If fish overlaps both (rare), keep the one it overlaps more by preference:
-  if (f.inRed && f.inBlue) {
-    // Simple tie-breaker: whichever net center is closer
-    const rcx = redNet.x + redNet.w / 2, rcy = redNet.y + redNet.h / 2;
-    const bcx = blueNet.x + blueNet.w / 2, bcy = blueNet.y + blueNet.h / 2;
-    const dr = (f.x - rcx) ** 2 + (f.y - rcy) ** 2;
-    const db = (f.x - bcx) ** 2 + (f.y - bcy) ** 2;
-    if (dr <= db) f.inBlue = false;
-    else f.inRed = false;
-  }
+function inRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 }
 
-canvas.addEventListener("mousedown", (e) => {
+canvas.addEventListener("mousedown", e => {
+  if (inputLocked) return;
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  const f = hitFish(mx, my);
-  if (f) dragging = { fish: f, ox: mx - f.x, oy: my - f.y };
+  const f = hitFish(e.clientX - rect.left, e.clientY - rect.top);
+  if (f) dragging = { fish: f };
 });
 
-canvas.addEventListener("mousemove", (e) => {
-  if (!dragging) return;
+canvas.addEventListener("mousemove", e => {
+  if (!dragging || inputLocked) return;
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  dragging.fish.x = mx - dragging.ox;
-  dragging.fish.y = my - dragging.oy;
+  dragging.fish.x = e.clientX - rect.left;
+  dragging.fish.y = e.clientY - rect.top;
   draw();
 });
 
-function dropFish() {
+canvas.addEventListener("mouseup", () => {
   if (!dragging) return;
-  placeFishInNets(dragging.fish);
+  const f = dragging.fish;
+  f.inRed = inRect(f.x, f.y, redNet);
+  f.inBlue = inRect(f.x, f.y, blueNet);
   dragging = null;
   updateCatchNow();
   draw();
-}
+});
 
-canvas.addEventListener("mouseup", dropFish);
-canvas.addEventListener("mouseleave", dropFish);
-
-// --------------------
-// Rendering game state
-// --------------------
 function renderState(state) {
   currentState = state;
 
@@ -239,41 +208,55 @@ function renderState(state) {
   maxPer.textContent = state.max_harvest_per_player;
 
   const submitted = new Set(state.submitted || []);
-  const players = (state.players || []).map(p => `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`);
-  playersLabel.textContent = players.join(", ");
+  playersLabel.textContent =
+    (state.players || []).map(p =>
+      `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`
+    ).join(", ");
 
-  const minP = state.min_players_to_start || 2;
-  const maxP = state.max_players_per_room || 4;
-
+  // Status + results
   if (!state.started) {
-    statusEl.textContent = `Waiting for at least ${minP} players… (${(state.players || []).length}/${maxP})`;
+    statusEl.textContent = "Waiting for players…";
     submitBtn.disabled = true;
   } else if (state.finished) {
-    statusEl.textContent = `Finished.`;
+    statusEl.textContent = "Finished.";
+    submitBtn.disabled = true;
+  } else if (inputLocked) {
+    statusEl.textContent = "Submitted — waiting for the global pond to resolve…";
     submitBtn.disabled = true;
   } else {
-    statusEl.textContent = `Sort your catch and submit.`;
+    statusEl.textContent = "Sort fish and submit.";
     submitBtn.disabled = false;
   }
 
-  // Keep results minimal so it doesn't “teach the trick” too early
+  // Show a little more feedback AFTER a round resolves (remaining/next_stock come from server)
   if (state.last_round_results) {
     const r = state.last_round_results;
-    const lines = [];
-    lines.push(`<div><b>Last round:</b></div>`);
-    lines.push(`<div>Total harvested: <b>${r.harvested_total}</b>, Remaining: <b>${r.remaining ?? "?"}</b></div>`);
-    resultsEl.innerHTML = lines.join("");
+    const parts = [];
+    parts.push(`<div><b>Last round:</b></div>`);
+    parts.push(`<div>Your room harvested: <b>${r.harvested_total}</b></div>`);
+    if (r.remaining !== null && r.remaining !== undefined) {
+      parts.push(`<div>Commons remaining (all rooms): <b>${r.remaining}</b></div>`);
+    }
+    if (r.next_stock !== null && r.next_stock !== undefined) {
+      parts.push(`<div>Next commons stock: <b>${r.next_stock}</b></div>`);
+    }
+    resultsEl.innerHTML = parts.join("");
   } else {
     resultsEl.innerHTML = "";
   }
 
-  // Reset the board each round for that “fresh pond” feeling
-  if (window._lastRenderedRound !== state.round_num) {
-    window._lastRenderedRound = state.round_num;
+  // IMPORTANT: Only reset fish board when the ROUND changes (global pond advanced).
+  if (lastRoundRendered !== state.round_num) {
+    lastRoundRendered = state.round_num;
     resetBoard(state.stock, state.max_harvest_per_player);
+
+    if (!window._swimmingStarted) {
+      window._swimmingStarted = true;
+      requestAnimationFrame(animateFish);
+    }
   }
 
-  // Leaderboard at end
+  // Leaderboard (end)
   if (state.finished) {
     endDiv.classList.remove("hidden");
     const nameById = {};
@@ -291,9 +274,6 @@ function renderState(state) {
   }
 }
 
-// --------------------
-// WebSocket connection
-// --------------------
 function connectAndJoin(room, name) {
   ws = new WebSocket(wsUrl());
 
@@ -301,11 +281,9 @@ function connectAndJoin(room, name) {
     ws.send(JSON.stringify({ type: "join", room_code: room, name }));
   };
 
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
     if (msg.type === "joined") {
-      playerId = msg.player_id;
-      joinMsg.textContent = "";
       joinDiv.classList.add("hidden");
       gameDiv.classList.remove("hidden");
     } else if (msg.type === "state") {
@@ -315,15 +293,9 @@ function connectAndJoin(room, name) {
       joinMsg.textContent = msg.message;
     }
   };
-
-  ws.onclose = () => {
-    // auto-reconnect
-    statusEl.textContent = "Disconnected. Reconnecting…";
-    setTimeout(() => connectAndJoin(room, name), 1200);
-  };
 }
 
-joinBtn.addEventListener("click", () => {
+joinBtn.onclick = () => {
   const room = roomInput.value.trim();
   const name = nameInput.value.trim();
   if (!room || !name) {
@@ -331,24 +303,30 @@ joinBtn.addEventListener("click", () => {
     return;
   }
   connectAndJoin(room, name);
-});
+};
 
-submitBtn.addEventListener("click", () => {
-  if (!ws || ws.readyState !== 1) return;
+submitBtn.onclick = () => {
   if (!currentState || !currentState.started || currentState.finished) return;
+  if (inputLocked) return;
 
   const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
 
-  // Only correctly sorted fish count
-  const correctCount = fishTokens.filter(f =>
-    (f.color === "red" && f.inRed) || (f.color === "blue" && f.inBlue)
-  ).length;
+  // Correctly sorted fish count
+  const correctFish = fishTokens.filter(f =>
+    (f.color === "red" && f.inRed) ||
+    (f.color === "blue" && f.inBlue)
+  );
 
-  let harvest = correctCount * tokenValue;
+  const harvest = correctFish.length * tokenValue;
 
-  // enforce server max
-  harvest = Math.max(0, Math.min(currentState.max_harvest_per_player, harvest));
+  // UX: immediately remove the caught fish from view + lock
+  inputLocked = true;
+  // Remove correctly sorted fish from the pond so it feels like harvesting
+  fishTokens = fishTokens.filter(f => !correctFish.includes(f));
+  updateCatchNow();
+  draw();
 
   ws.send(JSON.stringify({ type: "submit", harvest }));
-  statusEl.textContent = "Submitted. Waiting for others…";
-});
+  statusEl.textContent = "Submitted — waiting for the global pond to resolve…";
+  submitBtn.disabled = true;
+};
