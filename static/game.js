@@ -1,6 +1,8 @@
 // =====================================================
-// Commons Fishing Game — Red/Blue Sorting + Swimming Fish
-// UX fix: after Submit, remove caught fish + lock input until next round updates
+// Room-based Commons Fishing — Red/Blue Nets + Swimming Fish
+// Fixes:
+// - Fish STOP moving once in a net (so they stay in place)
+// - Round resolves per room (server does this); UI updates on new round
 // =====================================================
 
 let ws = null;
@@ -32,10 +34,9 @@ const ctx = canvas.getContext("2d");
 
 let fishTokens = [];
 let dragging = null;
-
-let inputLocked = false;        // lock after submit until next round update
 let lastRoundRendered = null;
 
+// Two nets
 const redNet = { x: 610, y: 90,  w: 220, h: 130 };
 const blueNet = { x: 610, y: 250, w: 220, h: 130 };
 
@@ -47,7 +48,6 @@ function wsUrl() {
 function resetBoard(stock, maxHarvest) {
   fishTokens = [];
   dragging = null;
-  inputLocked = false;
 
   const displayCount = Math.min(30, stock);
   const tokenValue = Math.max(1, Math.ceil(stock / Math.max(1, displayCount)));
@@ -115,7 +115,7 @@ function draw() {
   // Fish
   for (const f of fishTokens) {
     ctx.beginPath();
-    ctx.fillStyle = f.color;   // red/blue
+    ctx.fillStyle = f.color;
     ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "black";
@@ -131,24 +131,7 @@ function draw() {
 
   ctx.font = "14px system-ui";
   ctx.fillStyle = "black";
-  ctx.fillText(inputLocked ? "Waiting for the round to resolve…" : "Sort fish into the matching net, then Submit.", 16, canvas.height - 16);
-}
-
-function animateFish() {
-  for (const f of fishTokens) {
-    if (dragging && dragging.fish === f) continue;
-    // Don't animate fish once input locked (keeps the “submitted” state calm)
-    if (inputLocked) continue;
-
-    f.x += f.vx;
-    f.y += f.vy;
-
-    if (f.x < 30 || f.x > 560) f.vx *= -1;
-    if (f.y < 40 || f.y > 380) f.vy *= -1;
-  }
-
-  draw();
-  requestAnimationFrame(animateFish);
+  ctx.fillText("Drag fish into the matching net, then Submit.", 16, canvas.height - 16);
 }
 
 function updateCatchNow() {
@@ -157,6 +140,7 @@ function updateCatchNow() {
     (f.color === "red" && f.inRed) ||
     (f.color === "blue" && f.inBlue)
   ).length;
+
   catchNowEl.textContent = correct * tokenValue;
 }
 
@@ -174,15 +158,41 @@ function inRect(x, y, r) {
   return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 }
 
+function snapIntoNet(f, netRect) {
+  // Snap fish to a stable spot inside the net and stop motion
+  f.x = netRect.x + 40 + (f.id % 6) * 28;
+  f.y = netRect.y + 55 + Math.floor((f.id % 12) / 6) * 28;
+  f.vx = 0;
+  f.vy = 0;
+}
+
+function animateFish() {
+  for (const f of fishTokens) {
+    if (dragging && dragging.fish === f) continue;
+
+    // KEY FIX: fish do NOT swim once they are in a net
+    if (f.inRed || f.inBlue) continue;
+
+    f.x += f.vx;
+    f.y += f.vy;
+
+    if (f.x < 30 || f.x > 560) f.vx *= -1;
+    if (f.y < 40 || f.y > 380) f.vy *= -1;
+  }
+
+  draw();
+  requestAnimationFrame(animateFish);
+}
+
+// Dragging
 canvas.addEventListener("mousedown", e => {
-  if (inputLocked) return;
   const rect = canvas.getBoundingClientRect();
   const f = hitFish(e.clientX - rect.left, e.clientY - rect.top);
   if (f) dragging = { fish: f };
 });
 
 canvas.addEventListener("mousemove", e => {
-  if (!dragging || inputLocked) return;
+  if (!dragging) return;
   const rect = canvas.getBoundingClientRect();
   dragging.fish.x = e.clientX - rect.left;
   dragging.fish.y = e.clientY - rect.top;
@@ -192,13 +202,20 @@ canvas.addEventListener("mousemove", e => {
 canvas.addEventListener("mouseup", () => {
   if (!dragging) return;
   const f = dragging.fish;
+
   f.inRed = inRect(f.x, f.y, redNet);
   f.inBlue = inRect(f.x, f.y, blueNet);
+
+  // If placed, snap and stop swimming
+  if (f.inRed) snapIntoNet(f, redNet);
+  if (f.inBlue) snapIntoNet(f, blueNet);
+
   dragging = null;
   updateCatchNow();
   draw();
 });
 
+// Websocket + state
 function renderState(state) {
   currentState = state;
 
@@ -213,39 +230,29 @@ function renderState(state) {
       `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`
     ).join(", ");
 
-  // Status + results
   if (!state.started) {
     statusEl.textContent = "Waiting for players…";
     submitBtn.disabled = true;
   } else if (state.finished) {
     statusEl.textContent = "Finished.";
     submitBtn.disabled = true;
-  } else if (inputLocked) {
-    statusEl.textContent = "Submitted — waiting for the global pond to resolve…";
-    submitBtn.disabled = true;
   } else {
     statusEl.textContent = "Sort fish and submit.";
     submitBtn.disabled = false;
   }
 
-  // Show a little more feedback AFTER a round resolves (remaining/next_stock come from server)
   if (state.last_round_results) {
     const r = state.last_round_results;
-    const parts = [];
-    parts.push(`<div><b>Last round:</b></div>`);
-    parts.push(`<div>Your room harvested: <b>${r.harvested_total}</b></div>`);
-    if (r.remaining !== null && r.remaining !== undefined) {
-      parts.push(`<div>Commons remaining (all rooms): <b>${r.remaining}</b></div>`);
-    }
-    if (r.next_stock !== null && r.next_stock !== undefined) {
-      parts.push(`<div>Next commons stock: <b>${r.next_stock}</b></div>`);
-    }
-    resultsEl.innerHTML = parts.join("");
+    resultsEl.innerHTML =
+      `<div><b>Last season:</b></div>
+       <div>Total harvested: <b>${r.harvested_total}</b></div>
+       <div>Remaining in pond: <b>${r.remaining}</b></div>
+       <div>Next season stock: <b>${r.next_stock}</b></div>`;
   } else {
     resultsEl.innerHTML = "";
   }
 
-  // IMPORTANT: Only reset fish board when the ROUND changes (global pond advanced).
+  // Reset pond visuals when season changes
   if (lastRoundRendered !== state.round_num) {
     lastRoundRendered = state.round_num;
     resetBoard(state.stock, state.max_harvest_per_player);
@@ -254,23 +261,6 @@ function renderState(state) {
       window._swimmingStarted = true;
       requestAnimationFrame(animateFish);
     }
-  }
-
-  // Leaderboard (end)
-  if (state.finished) {
-    endDiv.classList.remove("hidden");
-    const nameById = {};
-    for (const p of state.players || []) nameById[p.player_id] = p.name;
-
-    const entries = Object.entries(state.totals || {})
-      .map(([pid, tot]) => ({ name: nameById[pid] || pid, tot }))
-      .sort((a, b) => b.tot - a.tot);
-
-    leaderboardEl.innerHTML = entries
-      .map((e, i) => `<div>${i + 1}. <b>${e.name}</b>: ${e.tot}</div>`)
-      .join("");
-  } else {
-    endDiv.classList.add("hidden");
   }
 }
 
@@ -286,6 +276,7 @@ function connectAndJoin(room, name) {
     if (msg.type === "joined") {
       joinDiv.classList.add("hidden");
       gameDiv.classList.remove("hidden");
+      joinMsg.textContent = "";
     } else if (msg.type === "state") {
       renderState(msg.state);
     } else if (msg.type === "error") {
@@ -307,26 +298,16 @@ joinBtn.onclick = () => {
 
 submitBtn.onclick = () => {
   if (!currentState || !currentState.started || currentState.finished) return;
-  if (inputLocked) return;
 
   const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
-
-  // Correctly sorted fish count
-  const correctFish = fishTokens.filter(f =>
+  const correctCount = fishTokens.filter(f =>
     (f.color === "red" && f.inRed) ||
     (f.color === "blue" && f.inBlue)
-  );
+  ).length;
 
-  const harvest = correctFish.length * tokenValue;
-
-  // UX: immediately remove the caught fish from view + lock
-  inputLocked = true;
-  // Remove correctly sorted fish from the pond so it feels like harvesting
-  fishTokens = fishTokens.filter(f => !correctFish.includes(f));
-  updateCatchNow();
-  draw();
+  let harvest = correctCount * tokenValue;
+  harvest = Math.max(0, Math.min(currentState.max_harvest_per_player, harvest));
 
   ws.send(JSON.stringify({ type: "submit", harvest }));
-  statusEl.textContent = "Submitted — waiting for the global pond to resolve…";
-  submitBtn.disabled = true;
+  statusEl.textContent = "Submitted. Waiting for others in your room…";
 };
