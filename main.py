@@ -31,7 +31,7 @@ MAX_HARVEST_PER_PLAYER = 20
 # Set to 1 to apply immediately after Season 1 (your example: 2 remaining -> 6 next)
 GROWTH_START_ROUND = 1
 
-STOCK_CAP = 200                  # set None to disable
+STOCK_CAP = None                  # set None to disable
 
 
 # -------------------------
