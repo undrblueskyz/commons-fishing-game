@@ -1,8 +1,6 @@
 // =====================================================
 // Room-based Commons Fishing — Red/Blue Nets + Swimming Fish
-// Fixes:
-// - Fish STOP moving once in a net (so they stay in place)
-// - Round resolves per room (server does this); UI updates on new round
+// Ends cleanly on collapse (0 fish): shows "Overfished" + disables submit
 // =====================================================
 
 let ws = null;
@@ -159,7 +157,7 @@ function inRect(x, y, r) {
 }
 
 function snapIntoNet(f, netRect) {
-  // Snap fish to a stable spot inside the net and stop motion
+  // snap fish to a stable spot inside the net and stop movement
   f.x = netRect.x + 40 + (f.id % 6) * 28;
   f.y = netRect.y + 55 + Math.floor((f.id % 12) / 6) * 28;
   f.vx = 0;
@@ -170,7 +168,7 @@ function animateFish() {
   for (const f of fishTokens) {
     if (dragging && dragging.fish === f) continue;
 
-    // KEY FIX: fish do NOT swim once they are in a net
+    // fish do not swim once in a net
     if (f.inRed || f.inBlue) continue;
 
     f.x += f.vx;
@@ -186,6 +184,8 @@ function animateFish() {
 
 // Dragging
 canvas.addEventListener("mousedown", e => {
+  if (currentState && (currentState.finished || currentState.stock <= 0)) return;
+
   const rect = canvas.getBoundingClientRect();
   const f = hitFish(e.clientX - rect.left, e.clientY - rect.top);
   if (f) dragging = { fish: f };
@@ -193,6 +193,7 @@ canvas.addEventListener("mousedown", e => {
 
 canvas.addEventListener("mousemove", e => {
   if (!dragging) return;
+
   const rect = canvas.getBoundingClientRect();
   dragging.fish.x = e.clientX - rect.left;
   dragging.fish.y = e.clientY - rect.top;
@@ -201,12 +202,12 @@ canvas.addEventListener("mousemove", e => {
 
 canvas.addEventListener("mouseup", () => {
   if (!dragging) return;
+
   const f = dragging.fish;
 
   f.inRed = inRect(f.x, f.y, redNet);
   f.inBlue = inRect(f.x, f.y, blueNet);
 
-  // If placed, snap and stop swimming
   if (f.inRed) snapIntoNet(f, redNet);
   if (f.inBlue) snapIntoNet(f, blueNet);
 
@@ -230,6 +231,7 @@ function renderState(state) {
       `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`
     ).join(", ");
 
+  // Status baseline
   if (!state.started) {
     statusEl.textContent = "Waiting for players…";
     submitBtn.disabled = true;
@@ -241,15 +243,31 @@ function renderState(state) {
     submitBtn.disabled = false;
   }
 
+  // Results panel
   if (state.last_round_results) {
     const r = state.last_round_results;
-    resultsEl.innerHTML =
-      `<div><b>Last season:</b></div>
-       <div>Total harvested: <b>${r.harvested_total}</b></div>
-       <div>Remaining in pond: <b>${r.remaining}</b></div>
-       <div>Next season stock: <b>${r.next_stock}</b></div>`;
+
+    // collapse message if any
+    if (r.collapse) {
+      resultsEl.innerHTML =
+        `<div><b>Overfished.</b></div>
+         <div>${r.collapse_message || "There are no fish left in the pond."}</div>`;
+    } else {
+      resultsEl.innerHTML =
+        `<div><b>Last season:</b></div>
+         <div>Stock before: <b>${r.stock_before ?? ""}</b></div>
+         <div>Total harvested: <b>${r.harvested_total}</b></div>
+         <div>Remaining in pond: <b>${r.remaining}</b></div>
+         <div>Next season stock: <b>${r.next_stock}</b></div>`;
+    }
   } else {
     resultsEl.innerHTML = "";
+  }
+
+  // Hard stop if stock is 0
+  if (state.stock <= 0) {
+    statusEl.textContent = "Overfished — there are no fish left in the pond.";
+    submitBtn.disabled = true;
   }
 
   // Reset pond visuals when season changes
@@ -261,6 +279,23 @@ function renderState(state) {
       window._swimmingStarted = true;
       requestAnimationFrame(animateFish);
     }
+  }
+
+  // Optional: show a simple end screen if finished
+  if (state.finished) {
+    endDiv.classList.remove("hidden");
+    const nameById = {};
+    for (const p of state.players || []) nameById[p.player_id] = p.name;
+
+    const entries = Object.entries(state.totals || {})
+      .map(([pid, tot]) => ({ name: nameById[pid] || pid, tot }))
+      .sort((a, b) => b.tot - a.tot);
+
+    leaderboardEl.innerHTML = entries
+      .map((e, i) => `<div>${i + 1}. <b>${e.name}</b>: ${e.tot}</div>`)
+      .join("");
+  } else {
+    endDiv.classList.add("hidden");
   }
 }
 
@@ -298,6 +333,7 @@ joinBtn.onclick = () => {
 
 submitBtn.onclick = () => {
   if (!currentState || !currentState.started || currentState.finished) return;
+  if (currentState.stock <= 0) return;
 
   const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
   const correctCount = fishTokens.filter(f =>
