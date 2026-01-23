@@ -17,26 +17,29 @@ def root():
     return FileResponse("static/index.html")
 
 
-# -------------------------
-# Config knobs
-# -------------------------
+# =====================================================
+# CONFIG
+# =====================================================
+APP_VERSION = "ROOM-POND-SEASONS-3X-2026-01-23C"
+
 MIN_PLAYERS_TO_START = 2
 MAX_PLAYERS_PER_ROOM = 4
 
 ROUNDS_TOTAL = 6
-STARTING_STOCK = 20              # your example uses 20
+STARTING_STOCK = 20
 MAX_HARVEST_PER_PLAYER = 20
 
-# Each remaining fish spawns 2 more => next_stock = remaining * 3
-# Set to 1 to apply immediately after Season 1 (your example: 2 remaining -> 6 next)
+# Growth happens after every season (including season 1 -> 2)
+# next_stock = remaining * 3
 GROWTH_START_ROUND = 1
 
-STOCK_CAP = None                  # set None to disable
+# No cap (prevents clipping back to 20/any number)
+STOCK_CAP = None
 
 
-# -------------------------
-# Room state
-# -------------------------
+# =====================================================
+# STATE
+# =====================================================
 @dataclass
 class Player:
     player_id: str
@@ -61,26 +64,33 @@ class RoomState:
 
     def to_public(self):
         return {
+            "app_version": APP_VERSION,
+
             "room_code": self.room_code,
             "round_num": self.round_num,
             "rounds_total": ROUNDS_TOTAL,
+
             "stock": self.stock,
             "max_harvest_per_player": MAX_HARVEST_PER_PLAYER,
+
             "growth_start_round": GROWTH_START_ROUND,
             "stock_cap": STOCK_CAP,
+
             "min_players_to_start": MIN_PLAYERS_TO_START,
             "max_players_per_room": MAX_PLAYERS_PER_ROOM,
+
             "players": [{"player_id": p.player_id, "name": p.name} for p in self.players],
             "submitted": list(self.submissions.keys()),
             "totals": self.totals,
             "last_round_results": self.last_round_results,
+
             "started": self.started,
             "finished": self.finished,
         }
 
 
 rooms: Dict[str, RoomState] = {}
-connections: Dict[str, List[WebSocket]] = {}
+connections: Dict[str, List[WebSocket]] = {}  # room_code -> websockets
 
 
 def get_or_create_room(room_code: str) -> RoomState:
@@ -98,12 +108,11 @@ async def broadcast(room_code: str, message: dict):
             await ws.send_text(json.dumps(message))
         except Exception:
             dead.append(ws)
-    if dead:
-        for ws in dead:
-            try:
-                connections[room_code].remove(ws)
-            except ValueError:
-                pass
+    for ws in dead:
+        try:
+            connections[room_code].remove(ws)
+        except ValueError:
+            pass
 
 
 def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]:
@@ -117,7 +126,7 @@ def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]
     scale = stock / total_req if total_req > 0 else 0.0
     scaled = {pid: int(round(h * scale)) for pid, h in requested.items()}
 
-    # fix rounding so it sums exactly to stock
+    # Fix rounding so sum(scaled) == stock exactly
     diff = stock - sum(scaled.values())
     pids = list(scaled.keys())
     i = 0
@@ -131,10 +140,13 @@ def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]
                 scaled[pid] -= 1
                 diff += 1
         i += 1
+
     return scaled
 
 
 def resolve_round(room: RoomState):
+    stock_before = room.stock
+
     requested = {
         pid: min(MAX_HARVEST_PER_PLAYER, max(0, int(h)))
         for pid, h in room.submissions.items()
@@ -144,7 +156,7 @@ def resolve_round(room: RoomState):
     harvested_total = sum(actual.values())
     remaining = max(0, room.stock - harvested_total)
 
-    # Growth: each remaining fish spawns 2 more => total triples
+    # Growth rule: each remaining fish spawns 2 more -> total triples
     if room.round_num >= GROWTH_START_ROUND:
         next_stock = remaining * 3
     else:
@@ -153,10 +165,13 @@ def resolve_round(room: RoomState):
     if STOCK_CAP is not None:
         next_stock = min(next_stock, STOCK_CAP)
 
+    # Update totals
     for pid, c in actual.items():
         room.totals[pid] = room.totals.get(pid, 0) + c
 
+    # Save round results for display
     room.last_round_results = {
+        "stock_before": stock_before,
         "requested": requested,
         "actual": actual,
         "harvested_total": harvested_total,
@@ -164,6 +179,7 @@ def resolve_round(room: RoomState):
         "next_stock": next_stock,
     }
 
+    # Advance season
     room.stock = next_stock
     room.round_num += 1
     room.submissions = {}
@@ -183,7 +199,7 @@ async def ws_endpoint(websocket: WebSocket):
         while True:
             raw = await websocket.receive_text()
 
-            # tolerate odd frames
+            # tolerate weird frames
             try:
                 msg = json.loads(raw)
             except Exception:
@@ -191,7 +207,7 @@ async def ws_endpoint(websocket: WebSocket):
 
             mtype = (msg.get("type") or "").strip().lower()
 
-            # fallback if type is missing
+            # fallback if type omitted
             if not mtype:
                 if "room_code" in msg and "name" in msg:
                     mtype = "join"
@@ -203,7 +219,7 @@ async def ws_endpoint(websocket: WebSocket):
                 name = ((msg.get("name") or "Player").strip() or "Player")[:24]
                 room = get_or_create_room(room_code)
 
-                # do not allow joining after room started
+                # lock roster after start
                 if room.started:
                     await websocket.send_text(json.dumps({
                         "type": "error",
@@ -249,21 +265,20 @@ async def ws_endpoint(websocket: WebSocket):
                 harvest = max(0, min(MAX_HARVEST_PER_PLAYER, harvest))
                 room.submissions[player_id] = harvest
 
-                # resolve when everyone in THIS room submitted
+                # Resolve when EVERYONE in this room has submitted
                 if len(room.submissions) == len(room.players):
                     resolve_round(room)
 
                 await broadcast(room_code, {"type": "state", "state": room.to_public()})
 
             elif mtype == "reset":
-                # resets ONLY THIS ROOM
+                # resets only the current room
                 if not room_code:
                     continue
                 rooms[room_code] = RoomState(room_code=room_code)
                 await broadcast(room_code, {"type": "state", "state": rooms[room_code].to_public()})
 
             else:
-                # ignore unknown messages
                 continue
 
     except WebSocketDisconnect:
