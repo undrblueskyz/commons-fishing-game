@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Room Observer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; }
+    .row { margin: 10px 0; }
+    input { padding: 8px; font-size: 16px; }
+    button { padding: 8px 12px; font-size: 16px; cursor: pointer; }
+    table { border-collapse: collapse; margin-top: 16px; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f5f5f5; }
+    .muted { color: #666; }
+    .badge { display: inline-block; padding: 2px 8px; border: 1px solid #ccc; border-radius: 999px; margin-left: 8px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Room Observer</h1>
+
+  <div class="row">
+    <label>Room code: </label>
+    <input id="room" placeholder="e.g., A" />
+    <button id="watch">Watch</button>
+    <span id="meta" class="muted"></span>
+  </div>
+
+  <div id="status" class="row muted"></div>
+  <div id="summary" class="row"></div>
+
+  <table id="tbl" style="display:none;">
+    <thead>
+      <tr>
+        <th>Player</th>
+        <th>Total caught</th>
+        <th>By season</th>
+        <th>Seasons survived</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <script src="/static/observer.js?v=20260123f"></script>
+</body>
+</html>
