@@ -1,291 +1,349 @@
-import json
-import time
-import uuid
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+// =====================================================
+// Room-based Commons Fishing — Red/Blue Nets + Swimming Fish
+// Ends cleanly on collapse (0 fish): shows "Overfished" + disables submit
+// =====================================================
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+let ws = null;
+let currentState = null;
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+const joinDiv = document.getElementById("join");
+const gameDiv = document.getElementById("game");
+const joinMsg = document.getElementById("joinMsg");
 
+const roomInput = document.getElementById("room");
+const nameInput = document.getElementById("name");
+const joinBtn = document.getElementById("joinBtn");
 
-@app.get("/")
-def root():
-    return FileResponse("static/index.html")
+const roomLabel = document.getElementById("roomLabel");
+const roundLabel = document.getElementById("roundLabel");
+const stockLabel = document.getElementById("stockLabel");
+const playersLabel = document.getElementById("playersLabel");
+const maxPer = document.getElementById("maxPer");
+const tokenValueEl = document.getElementById("tokenValue");
+const catchNowEl = document.getElementById("catchNow");
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+const submitBtn = document.getElementById("submitBtn");
+const endDiv = document.getElementById("end");
+const leaderboardEl = document.getElementById("leaderboard");
 
+const canvas = document.getElementById("pond");
+const ctx = canvas.getContext("2d");
 
-# =====================================================
-# CONFIG
-# =====================================================
-APP_VERSION = "ROOM-POND-SEASONS-3X-2026-01-23C"
+let fishTokens = [];
+let dragging = null;
+let lastRoundRendered = null;
 
-MIN_PLAYERS_TO_START = 2
-MAX_PLAYERS_PER_ROOM = 4
+// Two nets
+const redNet = { x: 610, y: 90,  w: 220, h: 130 };
+const blueNet = { x: 610, y: 250, w: 220, h: 130 };
 
-ROUNDS_TOTAL = 6
-STARTING_STOCK = 20
-MAX_HARVEST_PER_PLAYER = 20
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws`;
+}
 
-# Growth happens after every season (including season 1 -> 2)
-# next_stock = remaining * 3
-GROWTH_START_ROUND = 1
+function resetBoard(stock, maxHarvest) {
+  fishTokens = [];
+  dragging = null;
 
-# No cap (prevents clipping back to 20/any number)
-STOCK_CAP = None
+  const displayCount = Math.min(30, stock);
+  const tokenValue = Math.max(1, Math.ceil(stock / Math.max(1, displayCount)));
+  tokenValueEl.textContent = tokenValue;
 
+  const spawn = Math.min(displayCount, maxHarvest);
 
-# =====================================================
-# STATE
-# =====================================================
-@dataclass
-class Player:
-    player_id: str
-    name: str
+  for (let i = 0; i < spawn; i++) {
+    fishTokens.push({
+      id: i,
+      x: 70 + (i % 10) * 55,
+      y: 70 + Math.floor(i / 10) * 55,
+      r: 16,
+      color: i % 2 === 0 ? "red" : "blue",
+      inRed: false,
+      inBlue: false,
+      vx: (Math.random() - 0.5) * 0.6,
+      vy: (Math.random() - 0.5) * 0.6
+    });
+  }
 
+  updateCatchNow();
+  draw();
+}
 
-@dataclass
-class RoomState:
-    room_code: str
-    created_at: float = field(default_factory=time.time)
+function drawRoundedRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
 
-    round_num: int = 1
-    stock: int = STARTING_STOCK
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    players: List[Player] = field(default_factory=list)
-    submissions: Dict[str, int] = field(default_factory=dict)  # player_id -> harvest
-    totals: Dict[str, int] = field(default_factory=dict)       # player_id -> total catch
-    last_round_results: Optional[dict] = None
+  ctx.font = "16px system-ui";
+  ctx.fillStyle = "black";
+  ctx.fillText("Pond", 16, 24);
 
-    started: bool = False
-    finished: bool = False
+  // Red net
+  ctx.fillStyle = "rgba(255,0,0,0.15)";
+  drawRoundedRect(redNet.x, redNet.y, redNet.w, redNet.h, 14);
+  ctx.fill();
+  ctx.strokeStyle = "black";
+  ctx.stroke();
+  ctx.fillStyle = "black";
+  ctx.fillText("Red Net", redNet.x + 10, redNet.y + 20);
 
-    def to_public(self):
-        return {
-            "app_version": APP_VERSION,
+  // Blue net
+  ctx.fillStyle = "rgba(0,0,255,0.15)";
+  drawRoundedRect(blueNet.x, blueNet.y, blueNet.w, blueNet.h, 14);
+  ctx.fill();
+  ctx.strokeStyle = "black";
+  ctx.stroke();
+  ctx.fillStyle = "black";
+  ctx.fillText("Blue Net", blueNet.x + 10, blueNet.y + 20);
 
-            "room_code": self.room_code,
-            "round_num": self.round_num,
-            "rounds_total": ROUNDS_TOTAL,
+  // Fish
+  for (const f of fishTokens) {
+    ctx.beginPath();
+    ctx.fillStyle = f.color;
+    ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "black";
+    ctx.stroke();
 
-            "stock": self.stock,
-            "max_harvest_per_player": MAX_HARVEST_PER_PLAYER,
+    ctx.beginPath();
+    ctx.moveTo(f.x + f.r, f.y);
+    ctx.lineTo(f.x + f.r + 10, f.y - 6);
+    ctx.lineTo(f.x + f.r + 10, f.y + 6);
+    ctx.closePath();
+    ctx.fill();
+  }
 
-            "growth_start_round": GROWTH_START_ROUND,
-            "stock_cap": STOCK_CAP,
+  ctx.font = "14px system-ui";
+  ctx.fillStyle = "black";
+  ctx.fillText("Drag fish into the matching net, then Submit.", 16, canvas.height - 16);
+}
 
-            "min_players_to_start": MIN_PLAYERS_TO_START,
-            "max_players_per_room": MAX_PLAYERS_PER_ROOM,
+function updateCatchNow() {
+  const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
+  const correct = fishTokens.filter(f =>
+    (f.color === "red" && f.inRed) ||
+    (f.color === "blue" && f.inBlue)
+  ).length;
 
-            "players": [{"player_id": p.player_id, "name": p.name} for p in self.players],
-            "submitted": list(self.submissions.keys()),
-            "totals": self.totals,
-            "last_round_results": self.last_round_results,
+  catchNowEl.textContent = correct * tokenValue;
+}
 
-            "started": self.started,
-            "finished": self.finished,
-        }
+function hitFish(mx, my) {
+  for (let i = fishTokens.length - 1; i >= 0; i--) {
+    const f = fishTokens[i];
+    const dx = mx - f.x;
+    const dy = my - f.y;
+    if (Math.sqrt(dx * dx + dy * dy) <= f.r + 2) return f;
+  }
+  return null;
+}
 
+function inRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
 
-rooms: Dict[str, RoomState] = {}
-connections: Dict[str, List[WebSocket]] = {}  # room_code -> websockets
+function snapIntoNet(f, netRect) {
+  // snap fish to a stable spot inside the net and stop movement
+  f.x = netRect.x + 40 + (f.id % 6) * 28;
+  f.y = netRect.y + 55 + Math.floor((f.id % 12) / 6) * 28;
+  f.vx = 0;
+  f.vy = 0;
+}
 
+function animateFish() {
+  for (const f of fishTokens) {
+    if (dragging && dragging.fish === f) continue;
 
-def get_or_create_room(room_code: str) -> RoomState:
-    code = room_code.strip().upper()
-    if code not in rooms:
-        rooms[code] = RoomState(room_code=code)
-        connections[code] = []
-    return rooms[code]
+    // fish do not swim once in a net
+    if (f.inRed || f.inBlue) continue;
 
+    f.x += f.vx;
+    f.y += f.vy;
 
-async def broadcast(room_code: str, message: dict):
-    dead = []
-    for ws in connections.get(room_code, []):
-        try:
-            await ws.send_text(json.dumps(message))
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        try:
-            connections[room_code].remove(ws)
-        except ValueError:
-            pass
+    if (f.x < 30 || f.x > 560) f.vx *= -1;
+    if (f.y < 40 || f.y > 380) f.vy *= -1;
+  }
 
+  draw();
+  requestAnimationFrame(animateFish);
+}
 
-def scale_down_harvests(stock: int, requested: Dict[str, int]) -> Dict[str, int]:
-    """
-    If total requested > available stock, scale requests proportionally so total actual == stock.
-    """
-    total_req = sum(requested.values())
-    if total_req <= stock:
-        return requested
+// Dragging
+canvas.addEventListener("mousedown", e => {
+  if (currentState && (currentState.finished || currentState.stock <= 0)) return;
 
-    scale = stock / total_req if total_req > 0 else 0.0
-    scaled = {pid: int(round(h * scale)) for pid, h in requested.items()}
+  const rect = canvas.getBoundingClientRect();
+  const f = hitFish(e.clientX - rect.left, e.clientY - rect.top);
+  if (f) dragging = { fish: f };
+});
 
-    # Fix rounding so sum(scaled) == stock exactly
-    diff = stock - sum(scaled.values())
-    pids = list(scaled.keys())
-    i = 0
-    while diff != 0 and pids:
-        pid = pids[i % len(pids)]
-        if diff > 0:
-            scaled[pid] += 1
-            diff -= 1
-        else:
-            if scaled[pid] > 0:
-                scaled[pid] -= 1
-                diff += 1
-        i += 1
+canvas.addEventListener("mousemove", e => {
+  if (!dragging) return;
 
-    return scaled
+  const rect = canvas.getBoundingClientRect();
+  dragging.fish.x = e.clientX - rect.left;
+  dragging.fish.y = e.clientY - rect.top;
+  draw();
+});
 
+canvas.addEventListener("mouseup", () => {
+  if (!dragging) return;
 
-def resolve_round(room: RoomState):
-    stock_before = room.stock
+  const f = dragging.fish;
 
-    requested = {
-        pid: min(MAX_HARVEST_PER_PLAYER, max(0, int(h)))
-        for pid, h in room.submissions.items()
+  f.inRed = inRect(f.x, f.y, redNet);
+  f.inBlue = inRect(f.x, f.y, blueNet);
+
+  if (f.inRed) snapIntoNet(f, redNet);
+  if (f.inBlue) snapIntoNet(f, blueNet);
+
+  dragging = null;
+  updateCatchNow();
+  draw();
+});
+
+// Websocket + state
+function renderState(state) {
+  currentState = state;
+
+  roomLabel.textContent = state.room_code;
+  roundLabel.textContent = `${state.round_num} / ${state.rounds_total}`;
+  stockLabel.textContent = state.stock;
+  maxPer.textContent = state.max_harvest_per_player;
+
+  const submitted = new Set(state.submitted || []);
+  playersLabel.textContent =
+    (state.players || []).map(p =>
+      `${p.name}${submitted.has(p.player_id) ? " ✓" : ""}`
+    ).join(", ");
+
+  // Status baseline
+  if (!state.started) {
+    statusEl.textContent = "Waiting for players…";
+    submitBtn.disabled = true;
+  } else if (state.finished) {
+    statusEl.textContent = "Finished.";
+    submitBtn.disabled = true;
+  } else {
+    statusEl.textContent = "Sort fish and submit.";
+    submitBtn.disabled = false;
+  }
+
+  // Results panel
+  if (state.last_round_results) {
+    const r = state.last_round_results;
+
+    // collapse message if any
+    if (r.collapse) {
+      resultsEl.innerHTML =
+        `<div><b>Overfished.</b></div>
+         <div>${r.collapse_message || "There are no fish left in the pond."}</div>`;
+    } else {
+      resultsEl.innerHTML =
+        `<div><b>Last season:</b></div>
+         <div>Stock before: <b>${r.stock_before ?? ""}</b></div>
+         <div>Total harvested: <b>${r.harvested_total}</b></div>
+         <div>Remaining in pond: <b>${r.remaining}</b></div>
+         <div>Next season stock: <b>${r.next_stock}</b></div>`;
     }
+  } else {
+    resultsEl.innerHTML = "";
+  }
 
-    actual = scale_down_harvests(room.stock, requested)
-    harvested_total = sum(actual.values())
-    remaining = max(0, room.stock - harvested_total)
+  // Hard stop if stock is 0
+  if (state.stock <= 0) {
+    statusEl.textContent = "Overfished — there are no fish left in the pond.";
+    submitBtn.disabled = true;
+  }
 
-    # Growth rule: each remaining fish spawns 2 more -> total triples
-    if room.round_num >= GROWTH_START_ROUND:
-        next_stock = remaining * 3
-    else:
-        next_stock = remaining
+  // Reset pond visuals when season changes
+  if (lastRoundRendered !== state.round_num) {
+    lastRoundRendered = state.round_num;
+    resetBoard(state.stock, state.max_harvest_per_player);
 
-    if STOCK_CAP is not None:
-        next_stock = min(next_stock, STOCK_CAP)
-
-    # Update totals
-    for pid, c in actual.items():
-        room.totals[pid] = room.totals.get(pid, 0) + c
-
-    # Save round results for display
-    room.last_round_results = {
-        "stock_before": stock_before,
-        "requested": requested,
-        "actual": actual,
-        "harvested_total": harvested_total,
-        "remaining": remaining,
-        "next_stock": next_stock,
+    if (!window._swimmingStarted) {
+      window._swimmingStarted = true;
+      requestAnimationFrame(animateFish);
     }
+  }
 
-    # Advance season
-    room.stock = next_stock
-    room.round_num += 1
-    room.submissions = {}
+  // Optional: show a simple end screen if finished
+  if (state.finished) {
+    endDiv.classList.remove("hidden");
+    const nameById = {};
+    for (const p of state.players || []) nameById[p.player_id] = p.name;
 
-    if room.round_num > ROUNDS_TOTAL:
-        room.finished = True
+    const entries = Object.entries(state.totals || {})
+      .map(([pid, tot]) => ({ name: nameById[pid] || pid, tot }))
+      .sort((a, b) => b.tot - a.tot);
 
+    leaderboardEl.innerHTML = entries
+      .map((e, i) => `<div>${i + 1}. <b>${e.name}</b>: ${e.tot}</div>`)
+      .join("");
+  } else {
+    endDiv.classList.add("hidden");
+  }
+}
 
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
-    await websocket.accept()
+function connectAndJoin(room, name) {
+  ws = new WebSocket(wsUrl());
 
-    room_code: Optional[str] = None
-    player_id: Optional[str] = None
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "join", room_code: room, name }));
+  };
 
-    try:
-        while True:
-            raw = await websocket.receive_text()
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "joined") {
+      joinDiv.classList.add("hidden");
+      gameDiv.classList.remove("hidden");
+      joinMsg.textContent = "";
+    } else if (msg.type === "state") {
+      renderState(msg.state);
+    } else if (msg.type === "error") {
+      statusEl.textContent = msg.message;
+      joinMsg.textContent = msg.message;
+    }
+  };
+}
 
-            # tolerate weird frames
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                continue
+joinBtn.onclick = () => {
+  const room = roomInput.value.trim();
+  const name = nameInput.value.trim();
+  if (!room || !name) {
+    joinMsg.textContent = "Enter a room code and your name.";
+    return;
+  }
+  connectAndJoin(room, name);
+};
 
-            mtype = (msg.get("type") or "").strip().lower()
+submitBtn.onclick = () => {
+  if (!currentState || !currentState.started || currentState.finished) return;
+  if (currentState.stock <= 0) return;
 
-            # fallback if type omitted
-            if not mtype:
-                if "room_code" in msg and "name" in msg:
-                    mtype = "join"
-                elif "harvest" in msg:
-                    mtype = "submit"
+  const tokenValue = parseInt(tokenValueEl.textContent, 10) || 1;
+  const correctCount = fishTokens.filter(f =>
+    (f.color === "red" && f.inRed) ||
+    (f.color === "blue" && f.inBlue)
+  ).length;
 
-            if mtype == "join":
-                room_code = (msg.get("room_code", "") or "").strip().upper()
-                name = ((msg.get("name") or "Player").strip() or "Player")[:24]
-                room = get_or_create_room(room_code)
+  let harvest = correctCount * tokenValue;
+  harvest = Math.max(0, Math.min(currentState.max_harvest_per_player, harvest));
 
-                # lock roster after start
-                if room.started:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "This room already started. Use a different room code."
-                    }))
-                    continue
-
-                if len(room.players) >= MAX_PLAYERS_PER_ROOM:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Room is full (max 4 players). Use a different room code."
-                    }))
-                    continue
-
-                player_id = str(uuid.uuid4())[:8]
-                room.players.append(Player(player_id=player_id, name=name))
-                room.totals[player_id] = room.totals.get(player_id, 0)
-
-                connections[room_code].append(websocket)
-
-                if len(room.players) >= MIN_PLAYERS_TO_START:
-                    room.started = True
-
-                await websocket.send_text(json.dumps({"type": "joined", "player_id": player_id}))
-                await broadcast(room_code, {"type": "state", "state": room.to_public()})
-
-            elif mtype == "submit":
-                if not room_code or not player_id:
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Join a room first."}))
-                    continue
-
-                room = get_or_create_room(room_code)
-
-                if room.finished:
-                    await websocket.send_text(json.dumps({"type": "state", "state": room.to_public()}))
-                    continue
-
-                if not room.started:
-                    await websocket.send_text(json.dumps({"type": "error", "message": "Waiting for more players to join."}))
-                    continue
-
-                harvest = int(msg.get("harvest", 0))
-                harvest = max(0, min(MAX_HARVEST_PER_PLAYER, harvest))
-                room.submissions[player_id] = harvest
-
-                # Resolve when EVERYONE in this room has submitted
-                if len(room.submissions) == len(room.players):
-                    resolve_round(room)
-
-                await broadcast(room_code, {"type": "state", "state": room.to_public()})
-
-            elif mtype == "reset":
-                # resets only the current room
-                if not room_code:
-                    continue
-                rooms[room_code] = RoomState(room_code=room_code)
-                await broadcast(room_code, {"type": "state", "state": rooms[room_code].to_public()})
-
-            else:
-                continue
-
-    except WebSocketDisconnect:
-        if room_code and websocket in connections.get(room_code, []):
-            connections[room_code].remove(websocket)
-    except Exception:
-        try:
-            await websocket.send_text(json.dumps({"type": "error", "message": "Server error."}))
-        except Exception:
-            pass
+  ws.send(JSON.stringify({ type: "submit", harvest }));
+  statusEl.textContent = "Submitted. Waiting for others in your room…";
+};
