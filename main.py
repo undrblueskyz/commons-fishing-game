@@ -17,10 +17,17 @@ def root():
     return FileResponse("static/index.html")
 
 
+@app.get("/observer")
+def observer():
+    return FileResponse("static/observer.html")
+
+
 # =====================================================
 # CONFIG
 # =====================================================
-APP_VERSION = "ROOM-POND-SEASONS-3X-COLLAPSE-2026-01-23D"
+APP_VERSION = "ROOM-POND-SEASONS-3X-COLLAPSE-OBSERVERPIN-2026-01-23F"
+
+INSTRUCTOR_PIN = "522"  # 3-digit instructor PIN required for observer mode
 
 MIN_PLAYERS_TO_START = 2
 MAX_PLAYERS_PER_ROOM = 4
@@ -29,11 +36,10 @@ ROUNDS_TOTAL = 6
 STARTING_STOCK = 20
 MAX_HARVEST_PER_PLAYER = 20
 
-# Growth rule: next_stock = remaining * 3 (each remaining fish spawns 2 more)
-# Apply after every season (including season 1 -> 2)
+# Growth: each remaining fish spawns 2 more -> total triples
 GROWTH_START_ROUND = 1
 
-# No cap (prevents clipping back to 20)
+# Disable cap to avoid clipping
 STOCK_CAP = None
 
 
@@ -55,14 +61,44 @@ class RoomState:
     stock: int = STARTING_STOCK
 
     players: List[Player] = field(default_factory=list)
-    submissions: Dict[str, int] = field(default_factory=dict)  # player_id -> harvest
+    submissions: Dict[str, int] = field(default_factory=dict)  # player_id -> harvest this season
     totals: Dict[str, int] = field(default_factory=dict)       # player_id -> total catch
     last_round_results: Optional[dict] = None
 
+    # Per-season harvest history: season -> {player_id: actual_harvest}
+    round_history: Dict[int, Dict[str, int]] = field(default_factory=dict)
+
     started: bool = False
     finished: bool = False
+    collapse_round: Optional[int] = None
+
+    def seasons_completed(self) -> int:
+        return max(0, self.round_num - 1)
 
     def to_public(self):
+        players_public = [{"player_id": p.player_id, "name": p.name} for p in self.players]
+
+        per_player_by_round: Dict[str, Dict[int, int]] = {p["player_id"]: {} for p in players_public}
+        for rnum, harvests in self.round_history.items():
+            for pid, amt in harvests.items():
+                if pid not in per_player_by_round:
+                    per_player_by_round[pid] = {}
+                per_player_by_round[pid][rnum] = amt
+
+        seasons_survived = self.seasons_completed()
+
+        scoreboard = []
+        for p in players_public:
+            pid = p["player_id"]
+            scoreboard.append({
+                "player_id": pid,
+                "name": p["name"],
+                "total": self.totals.get(pid, 0),
+                "by_round": per_player_by_round.get(pid, {}),
+                "seasons_survived": seasons_survived,
+            })
+        scoreboard.sort(key=lambda x: x["total"], reverse=True)
+
         return {
             "app_version": APP_VERSION,
 
@@ -79,10 +115,16 @@ class RoomState:
             "min_players_to_start": MIN_PLAYERS_TO_START,
             "max_players_per_room": MAX_PLAYERS_PER_ROOM,
 
-            "players": [{"player_id": p.player_id, "name": p.name} for p in self.players],
+            "players": players_public,
             "submitted": list(self.submissions.keys()),
             "totals": self.totals,
             "last_round_results": self.last_round_results,
+
+            # Observer fields
+            "seasons_completed": self.seasons_completed(),
+            "collapse_round": self.collapse_round,
+            "scoreboard": scoreboard,
+            "round_history": self.round_history,
 
             "started": self.started,
             "finished": self.finished,
@@ -90,7 +132,7 @@ class RoomState:
 
 
 rooms: Dict[str, RoomState] = {}
-connections: Dict[str, List[WebSocket]] = {}  # room_code -> websockets
+connections: Dict[str, List[WebSocket]] = {}  # room_code -> websockets (players + observers)
 
 
 def get_or_create_room(room_code: str) -> RoomState:
@@ -156,7 +198,7 @@ def resolve_round(room: RoomState):
     harvested_total = sum(actual.values())
     remaining = max(0, room.stock - harvested_total)
 
-    # Growth: each remaining fish spawns 2 more -> total triples
+    # Growth rule: remaining fish spawn 2 more each => total triples
     if room.round_num >= GROWTH_START_ROUND:
         next_stock = remaining * 3
     else:
@@ -165,11 +207,13 @@ def resolve_round(room: RoomState):
     if STOCK_CAP is not None:
         next_stock = min(next_stock, STOCK_CAP)
 
+    # Save per-season harvest history (season = current round before increment)
+    room.round_history[room.round_num] = actual.copy()
+
     # Update totals
     for pid, c in actual.items():
         room.totals[pid] = room.totals.get(pid, 0) + c
 
-    # Save results
     room.last_round_results = {
         "stock_before": stock_before,
         "requested": requested,
@@ -184,13 +228,14 @@ def resolve_round(room: RoomState):
     room.round_num += 1
     room.submissions = {}
 
-    # ✅ Collapse: if pond is empty, end immediately
+    # Collapse condition: if pond is empty, end immediately
     if room.stock <= 0:
         room.finished = True
+        room.collapse_round = room.round_num - 1
         room.last_round_results["collapse"] = True
         room.last_round_results["collapse_message"] = "Overfished — there are no fish left in the pond."
 
-    # Normal end
+    # Normal end condition
     if room.round_num > ROUNDS_TOTAL:
         room.finished = True
 
@@ -201,11 +246,11 @@ async def ws_endpoint(websocket: WebSocket):
 
     room_code: Optional[str] = None
     player_id: Optional[str] = None
+    is_observer: bool = False
 
     try:
         while True:
             raw = await websocket.receive_text()
-
             try:
                 msg = json.loads(raw)
             except Exception:
@@ -220,7 +265,24 @@ async def ws_endpoint(websocket: WebSocket):
                 elif "harvest" in msg:
                     mtype = "submit"
 
-            if mtype == "join":
+            if mtype == "observe":
+                pin = str(msg.get("pin", "")).strip()
+                if pin != INSTRUCTOR_PIN:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Invalid instructor PIN."
+                    }))
+                    continue
+
+                is_observer = True
+                room_code = (msg.get("room_code", "") or "").strip().upper()
+                room = get_or_create_room(room_code)
+                connections[room_code].append(websocket)
+
+                await websocket.send_text(json.dumps({"type": "observing"}))
+                await websocket.send_text(json.dumps({"type": "state", "state": room.to_public()}))
+
+            elif mtype == "join":
                 room_code = (msg.get("room_code", "") or "").strip().upper()
                 name = ((msg.get("name") or "Player").strip() or "Player")[:24]
                 room = get_or_create_room(room_code)
@@ -253,6 +315,10 @@ async def ws_endpoint(websocket: WebSocket):
                 await broadcast(room_code, {"type": "state", "state": room.to_public()})
 
             elif mtype == "submit":
+                if is_observer:
+                    await websocket.send_text(json.dumps({"type": "error", "message": "Observers cannot submit."}))
+                    continue
+
                 if not room_code or not player_id:
                     await websocket.send_text(json.dumps({"type": "error", "message": "Join a room first."}))
                     continue
@@ -271,14 +337,12 @@ async def ws_endpoint(websocket: WebSocket):
                 harvest = max(0, min(MAX_HARVEST_PER_PLAYER, harvest))
                 room.submissions[player_id] = harvest
 
-                # resolve when everyone in THIS room submitted
                 if len(room.submissions) == len(room.players):
                     resolve_round(room)
 
                 await broadcast(room_code, {"type": "state", "state": room.to_public()})
 
             elif mtype == "reset":
-                # resets only this room
                 if not room_code:
                     continue
                 rooms[room_code] = RoomState(room_code=room_code)
